@@ -1,0 +1,32 @@
+# Vacation Budget App - Cursor AI Rules
+
+## Design Principles
+- Follow clean, modern design inspired by Uniswap's aesthetic
+- Use established color scheme: primaryPink (#FF3399), secondaryPink (#FF66E6), lightPink (#FF99F2)
+- Maintain consistent spacing: 40px for header top padding, 16px for standard padding
+- Ensure 44pt minimum touch targets for all interactive elements
+- Support both light and dark mode consistently
+
+## SwiftUI Standards
+- Follow Apple's Human Interface Guidelines
+- Use proper state management with @State, @Published, @EnvironmentObject
+- Implement proper error handling and validation
+- Use formatCurrency() helper for all monetary displays
+- Show decimals only when fractional parts exist
+
+## Number Pad Behavior
+- Allow decimal input up to 2 places maximum
+- Handle empty field decimal entry (add "0." prefix)
+- Use 70x70 circular buttons with proper spacing
+
+## Calendar Functionality
+- Toggle represents date presence, not calendar visibility
+- Sequential date selection: start → end → complete
+- "Done" button explicitly closes calendar
+- Pink date display allows re-editing
+
+## Code Quality
+- Test all changes thoroughly before implementation
+- Provide clear explanations for design decisions
+- Maintain existing functionality unless explicitly requested to change
+- Use consistent naming conventions and structure
