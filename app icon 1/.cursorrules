@@ -1,7 +1,7 @@
 # Vacation Budget App - Cursor AI Rules
 
 ## Design Principles
-- Follow clean, modern design inspired by Uniswap's aesthetic
+- Follow clean, modern design inspired by Uniswap's aesthetic and general popular clean budget app (credit karma, etc.) and crypto exchange (coinbase, etc.) aesthetics
 - Use established color scheme: primaryPink (#FF3399), secondaryPink (#FF66E6), lightPink (#FF99F2)
 - Maintain consistent spacing: 40px for header top padding, 16px for standard padding
 - Ensure 44pt minimum touch targets for all interactive elements
@@ -28,5 +28,8 @@
 ## Code Quality
 - Test all changes thoroughly before implementation
 - Provide clear explanations for design decisions
-- Maintain existing functionality unless explicitly requested to change
+- Maintain existing functionality unless explicitly requested to change. Seriously. If something breaks, make sure you restore how the app originally was before trying to fix again.
 - Use consistent naming conventions and structure
+
+## General Rules
+- if you feel that you don't understand something well enough to create it, ask clarifying questions to me

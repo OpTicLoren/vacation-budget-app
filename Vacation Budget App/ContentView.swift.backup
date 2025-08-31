@@ -164,6 +164,8 @@ struct Trip: Identifiable, Codable, Equatable {
     var startDate: Date?
     var endDate: Date?
     var lastUpdated: Date
+    var isDeleted: Bool = false
+    var deletedAt: Date? = nil
     
     // CRITICAL: Custom decoding to handle missing currency field in old data
     init(from decoder: Decoder) throws {
@@ -182,10 +184,12 @@ struct Trip: Identifiable, Codable, Equatable {
         startDate = try container.decodeIfPresent(Date.self, forKey: .startDate)
         endDate = try container.decodeIfPresent(Date.self, forKey: .endDate)
         lastUpdated = try container.decode(Date.self, forKey: .lastUpdated)
+        isDeleted = try container.decodeIfPresent(Bool.self, forKey: .isDeleted) ?? false
+        deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
     
     // Default initializer for new trips
-    init(id: UUID, name: String, budget: Double, currency: Currency = .usd, icon: String, expectedCategories: [ExpenseCategory], actualExpenses: [Expense], startDate: Date?, endDate: Date?, lastUpdated: Date) {
+    init(id: UUID, name: String, budget: Double, currency: Currency = .usd, icon: String, expectedCategories: [ExpenseCategory], actualExpenses: [Expense], startDate: Date?, endDate: Date?, lastUpdated: Date, isDeleted: Bool = false, deletedAt: Date? = nil) {
         self.id = id
         self.name = name
         self.budget = budget
@@ -196,6 +200,8 @@ struct Trip: Identifiable, Codable, Equatable {
         self.startDate = startDate
         self.endDate = endDate
         self.lastUpdated = lastUpdated
+        self.isDeleted = isDeleted
+        self.deletedAt = deletedAt
     }
 }
 
@@ -218,11 +224,19 @@ class TripStore: ObservableObject {
     let yearlyBudgetKey = "yearly_budget_key"
     let globalCurrencyKey = "global_currency_key"
     
-    var activeTrips: [Trip] { trips.filter { !isPastTrip($0) } }
-    var pastTrips: [Trip] { trips.filter { isPastTrip($0) } }
+    var activeTrips: [Trip] { trips.filter { !$0.isDeleted && !isPastTrip($0) } }
+    var pastTrips: [Trip] { trips.filter { !$0.isDeleted && isPastTrip($0) } }
+    var recentlyDeleted: [Trip] { 
+        let deleted = trips.filter { $0.isDeleted }
+        print("📱 Recently deleted count: \(deleted.count)")
+        for trip in deleted {
+            print("   - \(trip.name): isDeleted=\(trip.isDeleted), deletedAt=\(trip.deletedAt?.description ?? "nil")")
+        }
+        return deleted
+    }
     
     var totalSpentThisYear: Double {
-        trips.reduce(0) { total, trip in
+        trips.filter { !$0.isDeleted }.reduce(0) { total, trip in
             total + trip.actualExpenses.reduce(0) { $0 + $1.amount }
         }
     }
@@ -249,7 +263,7 @@ class TripStore: ObservableObject {
     
     private func isPastTrip(_ trip: Trip) -> Bool {
         guard let endDate = trip.endDate else { return false }
-        return endDate < Date() // Only trips with end dates before today are past trips
+        return Calendar.current.isDate(endDate, inSameDayAs: Date()) || endDate < Date()
     }
     
     init() {
@@ -257,6 +271,7 @@ class TripStore: ObservableObject {
         loadYearlyBudget()
         loadGlobalCurrency()
         previousGlobalCurrency = globalCurrency // Initialize previous currency
+        cleanRecentlyDeleted() // Clean up old deleted trips on startup
     }
     
     func addTrip(name: String, budget: Double, currency: Currency, icon: String, startDate: Date?, endDate: Date?) {
@@ -274,8 +289,20 @@ class TripStore: ObservableObject {
     
     func deleteTrip(at offsets: IndexSet) {
         for idx in offsets {
-            let trip = activeTrips[idx]
-            trips.removeAll { $0.id == trip.id }
+            var trip = activeTrips[idx]
+            trip.isDeleted = true
+            trip.deletedAt = Date()
+            updateTrip(trip)
+            print("🗑️ Deleted trip: \(trip.name), isDeleted: \(trip.isDeleted)")
+        }
+    }
+    
+    func restoreTrip(_ trip: Trip) {
+        if let idx = trips.firstIndex(where: { $0.id == trip.id }) {
+            trips[idx].isDeleted = false
+            trips[idx].deletedAt = nil
+            // Make restored trips automatically go to past trips
+            trips[idx].endDate = Calendar.current.date(byAdding: .day, value: -1, to: Date())
         }
     }
     
@@ -289,7 +316,10 @@ class TripStore: ObservableObject {
         }
     }
     
-
+    func cleanRecentlyDeleted() {
+        let now = Date()
+        trips.removeAll { $0.isDeleted && $0.deletedAt != nil && now.timeIntervalSince($0.deletedAt!) > 30*24*60*60 }
+    }
     
     // CRITICAL: Emergency data recovery function
     func attemptDataRecovery() -> Bool {
@@ -502,7 +532,9 @@ struct ContentView: View {
     func deletePastTrip(at offsets: IndexSet) {
         for index in offsets {
             let trip = sortedPastTrips[index]
-            store.permanentlyDeleteTrip(trip)
+            if let storeIndex = store.trips.firstIndex(where: { $0.id == trip.id }) {
+                store.deleteTrip(at: IndexSet([storeIndex]))
+            }
         }
     }
     
@@ -511,8 +543,9 @@ struct ContentView: View {
     }
     
     func deletePastTripById(_ tripId: UUID) {
-        if let trip = sortedPastTrips.first(where: { $0.id == tripId }) {
-            store.permanentlyDeleteTrip(trip)
+        if let trip = sortedPastTrips.first(where: { $0.id == tripId }),
+           let storeIndex = store.trips.firstIndex(where: { $0.id == trip.id }) {
+            store.deleteTrip(at: IndexSet([storeIndex]))
         }
     }
     
@@ -581,146 +614,41 @@ struct ContentView: View {
                 (darkMode ? Color.darkBackground : Color.white)
                     .ignoresSafeArea()
                 if sortedActiveTrips.isEmpty && sortedPastTrips.isEmpty {
-                    ZStack {
-                        // Canva-inspired gradient background - bottom half only
                     VStack {
                         Spacer()
-                            
-                            // Bottom gradient wave effect like Canva
-                            Rectangle()
-                                .fill(
-                                    LinearGradient(
-                                        gradient: Gradient(colors: [
-                                            Color.clear,
-                                            Color.lightPink.opacity(0.3),
-                                            Color.primaryPink.opacity(0.6),
-                                            Color.secondaryPink.opacity(0.8)
-                                        ]),
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    )
-                                )
-                                .frame(height: UIScreen.main.bounds.height * 0.6)
-                                .blur(radius: 20)
-                                .overlay(
-                                    // Additional gradient overlay for depth
-                                    Rectangle()
-                                        .fill(
-                                            RadialGradient(
-                                                gradient: Gradient(colors: [
-                                                    Color.primaryPink.opacity(0.4),
-                                                    Color.clear
-                                                ]),
-                                                center: .bottomTrailing,
-                                                startRadius: 100,
-                                                endRadius: 400
-                                            )
-                                        )
-                                        .blur(radius: 30)
-                                )
-                        }
-                        
-                        // Main content with proper centering
-                        VStack(spacing: 0) {
-                            Spacer()
-                            
-                            // App title with designer typography
-                            VStack(spacing: 24) {
-                                Text("Vacation Budget App")
-                                    .font(.system(size: 42, weight: .black, design: .rounded))
-                                    .foregroundColor(darkMode ? .darkText : .black)
-                                    .multilineTextAlignment(.center)
-                                    .lineLimit(2)
-                                    .kerning(0.5)
-                                
-                                // Improved tagline with comma and emoji
-                                Text("Save time and money on travel,\nwithout spreadsheets 🥱")
-                                    .font(.system(size: 18, weight: .medium, design: .rounded))
-                                    .foregroundColor(darkMode ? .darkSecondaryText : .black.opacity(0.7))
-                                    .multilineTextAlignment(.center)
-                                    .lineSpacing(2)
-                                
-                                // Add Trip Button - moved higher and made bigger
                         Button(action: { showingAddTrip = true }) {
-                                    HStack(spacing: 14) {
-                                        Image(systemName: "plus.circle.fill")
-                                            .font(.system(size: 26, weight: .semibold))
+                            HStack {
+                                Image(systemName: "plus")
                                 Text("Add Trip")
-                                            .font(.system(size: 24, weight: .bold, design: .rounded))
-                                    }
-                                    .padding(.horizontal, 48)
-                                    .padding(.vertical, 20)
-                                    .background(
-                                        Capsule()
-                                            .fill(
-                                                LinearGradient(
-                                                    gradient: Gradient(colors: [Color.primaryPink, Color.secondaryPink]),
-                                                    startPoint: .leading,
-                                                    endPoint: .trailing
-                                                )
-                                            )
-                                    )
-                            .foregroundColor(.white)
-                                    .shadow(color: Color.primaryPink.opacity(0.4), radius: 20, x: 0, y: 8)
-                                    .overlay(
-                                        Capsule()
-                                            .stroke(Color.white.opacity(0.3), lineWidth: 1)
-                                    )
-                        }
-                        .accessibilityLabel("Add Trip")
+                                    .font(.system(size: 28, weight: .bold, design: .default))
                             }
                             .padding(.horizontal, 32)
-                            
+                            .padding(.vertical, 20)
+                            .background(Capsule().fill(LinearGradient(gradient: Gradient(colors: [Color.primaryPink, Color.secondaryPink]), startPoint: .leading, endPoint: .trailing)))
+                            .foregroundColor(.white)
+                            .shadow(color: Color.primaryPink.opacity(0.4), radius: 12, x: 0, y: 6)
+                        }
+                        .accessibilityLabel("Add Trip")
                         Spacer()
-                            Spacer() // Extra spacer for better bottom positioning
                     }
-                        
-                        // Settings button overlay with mode tip
-                        VStack {
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay(
                         HStack {
                             Button(action: { showingSettings = true }) {
                                 Image(systemName: "gearshape.fill")
-                                        .font(.system(size: 22, weight: .medium))
-                                        .foregroundColor(.primaryPink)
-                                        .padding(14)
-                                        .background(
-                                            Circle()
-                                                .fill(Color.white.opacity(darkMode ? 0.15 : 0.95))
-                                                .shadow(color: Color.primaryPink.opacity(0.2), radius: 12, x: 0, y: 6)
-                                        )
-                                }
-                                .accessibilityLabel("Settings")
-                            
-                            // Mode tip with arrow
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.left")
-                                    .font(.system(size: 14, weight: .medium))
+                                    .resizable()
+                                    .frame(width: 32, height: 32)
                                     .foregroundColor(.primaryPink)
-                                Text(darkMode ? "Try Light Mode!" : "Try Dark Mode!")
-                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                                    .foregroundColor(.primaryPink)
+                                    .padding(16)
+                                    .background(Circle().fill(Color.lightPink.opacity(0.3)))
+                                    .shadow(color: .primaryPink.opacity(0.2), radius: 4, x: 0, y: 2)
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(
-                                Capsule()
-                                    .fill(Color.white.opacity(darkMode ? 0.15 : 0.95))
-                                    .shadow(color: Color.primaryPink.opacity(0.15), radius: 8, x: 0, y: 4)
-                            )
-                            .overlay(
-                                Capsule()
-                                    .stroke(darkMode ? Color.white.opacity(0.6) : Color.black.opacity(0.3), lineWidth: 1)
-                            )
-                            .opacity(0.85)
-                            
                             Spacer()
                         }
-                            .padding(.top, 60)
+                        .padding(.bottom, 32)
                         .padding(.leading, 24)
-                            Spacer()
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        , alignment: .bottomLeading
+                    )
                 } else {
                     VStack(spacing: 0) {
                         HStack {
@@ -1600,7 +1528,7 @@ struct TripFormView: View {
     var dateRangeDisplay: String {
         if hasSelectedDates {
             let formatter = DateFormatter()
-            formatter.dateFormat = "M/d/yy" // Shorter format to fit on one line
+            formatter.dateStyle = .short
             return "\(formatter.string(from: startDate)) - \(formatter.string(from: endDate))"
         }
         return ""
@@ -1631,8 +1559,8 @@ struct TripFormView: View {
         ZStack {
             (darkMode ? Color.darkBackground : Color.white).ignoresSafeArea()
             
-            VStack(spacing: 12) {
-                // Header with compact spacing
+            VStack(spacing: 20) {
+                // Header with proper spacing
                 HStack {
                     Button("Cancel") {
                         dismiss()
@@ -1649,36 +1577,47 @@ struct TripFormView: View {
                     .opacity(0) // Hidden but maintains spacing
                 }
                 .padding(.horizontal)
-                .padding(.top, 50) // Reduced top padding
+                .padding(.top, 40)
                 
-                // Compact amount display
+                // Large amount display with balanced spacing
                 Text(displayAmount)
-                    .font(.system(size: 36, weight: .bold)) // Smaller for better fit
+                    .font(.system(size: 48, weight: .bold))
                     .foregroundColor(darkMode ? .darkText : .black)
-                    .padding(.vertical, 4)
-                    
-                                    // Form fields with consistent spacing
-                VStack(spacing: 12) {
-                    // Combined Trip icon and name field
-                    HStack {
-                        // Trip Icon with change indicator
-                        Button(action: { showingIconPicker = true }) {
-                            ZStack {
-                                Text(selectedIcon)
-                                    .font(.system(size: 24))
-                                    .frame(width: 40, height: 40)
-                                    .background(Color.lightPink.opacity(0.2))
-                                    .cornerRadius(8)
-                                
-                                // Small plus indicator to show it's tappable
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(.primaryPink)
-                                    .background(Color.white)
-                                    .clipShape(Circle())
-                                    .offset(x: 12, y: -12)
+                    .padding(.vertical, 16)
+                
+                // Form fields with consistent spacing
+                VStack(spacing: 16) {
+                    // Trip Icon picker
+                    Button(action: { showingIconPicker = true }) {
+                        HStack {
+                            Text(selectedIcon)
+                                .font(.system(size: 24))
+                                .frame(width: 20, height: 20)
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Trip Icon")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(darkMode ? .darkSecondaryText : .gray)
+                                Text("Tap to change")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(darkMode ? .darkText : .black)
                             }
+                            Spacer()
+                            Image(systemName: "chevron.down")
+                                .foregroundColor(darkMode ? .darkSecondaryText : .gray)
+                                .font(.system(size: 12))
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .background(darkMode ? Color.darkCard : Color.gray.opacity(0.05))
+                        .cornerRadius(10)
+                    }
+                    
+                    // Trip name field
+                    HStack {
+                        Image(systemName: "textformat")
+                            .foregroundColor(.primaryPink)
+                            .frame(width: 20, height: 20)
                         
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Trip Name")
@@ -1765,14 +1704,12 @@ struct TripFormView: View {
                             Spacer()
                             if !dateRangeDisplay.isEmpty {
                                 Text(dateRangeDisplay)
-                                    .font(.system(size: 11, weight: .medium)) // Smaller font to fit better
+                                    .font(.system(size: 12, weight: .medium))
                                     .foregroundColor(.primaryPink)
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 4)
                                     .background(Color.lightPink.opacity(0.2))
                                     .cornerRadius(6)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.8) // Allow text to scale down if needed
                                     .onTapGesture {
                                         // Tap pink dates to reopen calendar
                                         showDatePicker = true
@@ -1791,11 +1728,8 @@ struct TripFormView: View {
                                     } else {
                                         // When turned OFF, clear dates and hide calendar
                                         showDatePicker = false
-                                        // Reset dates without triggering onChange
-                                        DispatchQueue.main.async {
-                                            startDate = Date()
-                                            endDate = Date()
-                                        }
+                                        startDate = Date()
+                                        endDate = Date()
                                     }
                                 }
                         }
@@ -1808,18 +1742,8 @@ struct TripFormView: View {
                             VStack(spacing: 8) {
                                 HStack {
                                     Text(dateSelectionStep == .start ? "Select start date" : dateSelectionStep == .end ? "Select end date" : "Dates selected")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundColor(dateSelectionStep == .complete ? .primaryPink : .white)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 6)
-                                        .background(
-                                            dateSelectionStep != .complete
-                                            ? LinearGradient(gradient: Gradient(colors: [Color.primaryPink, Color.secondaryPink]), startPoint: .leading, endPoint: .trailing)
-                                            : LinearGradient(gradient: Gradient(colors: [Color.clear]), startPoint: .leading, endPoint: .trailing)
-                                        )
-                                        .cornerRadius(8)
-                                        .shadow(color: dateSelectionStep != .complete ? Color.primaryPink.opacity(0.4) : Color.clear, radius: 4, x: 0, y: 2)
-                                    
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(.primaryPink)
                                     Spacer()
                                     Button("Done") {
                                         showDatePicker = false
@@ -1829,59 +1753,24 @@ struct TripFormView: View {
                                         }
                                     }
                                     .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(dateSelectionStep == .complete ? .white : .primaryPink)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        dateSelectionStep == .complete 
-                                        ? LinearGradient(gradient: Gradient(colors: [Color.primaryPink, Color.secondaryPink]), startPoint: .leading, endPoint: .trailing)
-                                        : LinearGradient(gradient: Gradient(colors: [Color.clear]), startPoint: .leading, endPoint: .trailing)
-                                    )
-                                    .cornerRadius(8)
-                                    .shadow(color: dateSelectionStep == .complete ? Color.primaryPink.opacity(0.4) : Color.clear, radius: 4, x: 0, y: 2)
+                                    .foregroundColor(.primaryPink)
                                 }
                                 
                                 DatePicker("", selection: dateSelectionStep == .start ? $startDate : $endDate, displayedComponents: .date)
                                     .datePickerStyle(GraphicalDatePickerStyle())
                                     .accentColor(.primaryPink)
-                                    .onChange(of: startDate) { newStartDate in
-                                        // Only process if we're actually in start selection mode
-                                        guard dateSelectionStep == .start || dateSelectionStep == .complete else { return }
-                                        
+                                    .onChange(of: startDate) { _ in
                                         if dateSelectionStep == .start {
-                                            // Move to end date selection
                                             dateSelectionStep = .end
-                                            // Ensure end date is not before start date
-                                            if endDate < newStartDate {
-                                                DispatchQueue.main.async {
-                                                    endDate = newStartDate
-                                                }
-                                            }
-                                        } else if dateSelectionStep == .complete {
-                                            // User wants to restart: reset to end selection
-                                            dateSelectionStep = .end
-                                            // Ensure end date is not before new start date
-                                            if endDate < newStartDate {
-                                                DispatchQueue.main.async {
-                                                    endDate = newStartDate
-                                                }
+                                            if endDate < startDate {
+                                                endDate = startDate
                                             }
                                         }
                                     }
-                                    .onChange(of: endDate) { newEndDate in
-                                        // Only process if we're actually in end selection mode
-                                        guard dateSelectionStep == .end || dateSelectionStep == .complete else { return }
-                                        
+                                    .onChange(of: endDate) { _ in
                                         if dateSelectionStep == .end {
-                                            // Complete the selection
                                             dateSelectionStep = .complete
                                             hasSelectedDates = true
-                                        } else if dateSelectionStep == .complete {
-                                            // User wants to restart: this end date becomes the new start date
-                                            DispatchQueue.main.async {
-                                                startDate = newEndDate
-                                            }
-                                            dateSelectionStep = .end
                                         }
                                     }
                             }
@@ -1890,57 +1779,56 @@ struct TripFormView: View {
                             .background(darkMode ? Color.darkCard : Color.gray.opacity(0.05))
                         }
                     }
-                    }
-                    .padding(.horizontal)
-                    
-                    Spacer()
-                    
-                    // Evenly spaced number pad
-                    VStack(spacing: 16) {
-                        ForEach([["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], [".", "0", "←"]], id: \.self) { row in
-                            HStack(spacing: 16) {
-                                ForEach(row, id: \.self) { button in
-                                    Button(action: {
-                                        if button == "←" {
-                                            if !budget.isEmpty {
-                                                budget.removeLast()
-                                            }
-                                        } else if button == "." {
-                                            if !budget.contains(".") {
-                                                if budget.isEmpty {
-                                                    budget = "0."
-                                                } else {
-                                                    budget += button
-                                                }
-                                            }
-                                        } else {
-                                            // Check if we already have a decimal point and 2 digits after it
-                                            if let decimalIndex = budget.firstIndex(of: ".") {
-                                                let decimalPart = budget[budget.index(after: decimalIndex)...]
-                                                if decimalPart.count < 2 {
-                                                    budget += button
-                                                }
+                }
+                .padding(.horizontal)
+                
+                Spacer()
+                
+                // Number pad with better spacing
+                VStack(spacing: 16) {
+                    ForEach([["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], [".", "0", "←"]], id: \.self) { row in
+                        HStack(spacing: 16) {
+                            ForEach(row, id: \.self) { button in
+                                Button(action: {
+                                    if button == "←" {
+                                        if !budget.isEmpty {
+                                            budget.removeLast()
+                                        }
+                                    } else if button == "." {
+                                        if !budget.contains(".") {
+                                            if budget.isEmpty {
+                                                budget = "0."
                                             } else {
                                                 budget += button
                                             }
                                         }
-                                    }) {
-                                        Text(button)
-                                            .font(.system(size: 26, weight: .medium))
-                                            .foregroundColor(darkMode ? .darkText : .black)
-                                            .frame(width: 70, height: 70)
-                                            .background(darkMode ? Color.darkCard : Color.gray.opacity(0.1))
-                                            .clipShape(Circle())
+                                    } else {
+                                        // Check if we already have a decimal point and 2 digits after it
+                                        if let decimalIndex = budget.firstIndex(of: ".") {
+                                            let decimalPart = budget[budget.index(after: decimalIndex)...]
+                                            if decimalPart.count < 2 {
+                                                budget += button
+                                            }
+                                        } else {
+                                            budget += button
+                                        }
                                     }
+                                }) {
+                                    Text(button)
+                                        .font(.system(size: 26, weight: .medium))
+                                        .foregroundColor(darkMode ? .darkText : .black)
+                                        .frame(width: 70, height: 70)
+                                        .background(darkMode ? Color.darkCard : Color.gray.opacity(0.1))
+                                        .clipShape(Circle())
                                 }
                             }
                         }
                     }
-                    
-                    Spacer()
-                    
-                    // Compact continue button
-                    Button(action: {
+                }
+                .padding(.bottom, 16)
+                
+                // Continue button with proper spacing
+                Button(action: {
                     // Only hide calendar when continue is pressed
                     if showDatePicker {
                         showDatePicker = false
@@ -1973,10 +1861,10 @@ struct TripFormView: View {
                         .cornerRadius(16)
                         .shadow(color: Color.primaryPink.opacity(0.4), radius: 8, x: 0, y: 4)
                 }
-                    .disabled(name.isEmpty || Double(budget) == nil)
-                    .opacity((name.isEmpty || Double(budget) == nil) ? 0.6 : 1.0)
-                    .padding(.horizontal)
-                    .padding(.bottom, 30)
+                .disabled(name.isEmpty || Double(budget) == nil)
+                .opacity((name.isEmpty || Double(budget) == nil) ? 0.6 : 1.0)
+                .padding(.horizontal)
+                .padding(.bottom, 30)
             }
         }
         .sheet(isPresented: $showingIconPicker) {
@@ -2165,7 +2053,7 @@ struct CategoryFormView: View {
         ZStack {
             (darkMode ? Color.darkBackground : Color.white).ignoresSafeArea()
             
-            VStack(spacing: 12) {
+            VStack(spacing: 16) {
                 // Header
                 HStack {
                     Button("Cancel") {
@@ -2183,13 +2071,13 @@ struct CategoryFormView: View {
                     .opacity(0) // Hidden but maintains spacing
                 }
                 .padding(.horizontal)
-                .padding(.top, 50)
+                .padding(.top, 40)
                 
                 // Large amount display
                 Text(displayAmount)
-                    .font(.system(size: 42, weight: .bold))
+                    .font(.system(size: 48, weight: .bold))
                     .foregroundColor(darkMode ? .darkText : .black)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 12)
                 
                 // Form fields
                 VStack(spacing: 12) {
@@ -2227,8 +2115,8 @@ struct CategoryFormView: View {
                 
                 Spacer()
                 
-                // Evenly spaced number pad
-                VStack(spacing: 16) {
+                // Number pad - always visible
+                VStack(spacing: 12) {
                     ForEach([["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], [".", "0", "←"]], id: \.self) { row in
                         HStack(spacing: 16) {
                             ForEach(row, id: \.self) { button in
@@ -2268,8 +2156,7 @@ struct CategoryFormView: View {
                         }
                     }
                 }
-                
-                Spacer()
+                .padding(.bottom, 12)
                 
                 // Continue button
                 Button(action: {
@@ -2292,7 +2179,7 @@ struct CategoryFormView: View {
                 .disabled(name.isEmpty || Double(amount) == nil)
                 .opacity((name.isEmpty || Double(amount) == nil) ? 0.6 : 1.0)
                 .padding(.horizontal)
-                .padding(.bottom, 30)
+                .padding(.bottom, 20)
             }
         }
         .onAppear {
@@ -2363,7 +2250,7 @@ struct ExpenseFormView: View {
         ZStack {
             (darkMode ? Color.darkBackground : Color.white).ignoresSafeArea()
             
-            VStack(spacing: 12) {
+            VStack(spacing: 16) {
                 // Header
                 HStack {
                     Button("Cancel") {
@@ -2381,13 +2268,13 @@ struct ExpenseFormView: View {
                     .opacity(0) // Hidden but maintains spacing
                 }
                 .padding(.horizontal)
-                .padding(.top, 50)
+                .padding(.top, 40)
                 
                 // Large amount display
                 Text(displayAmount)
-                    .font(.system(size: 42, weight: .bold))
+                    .font(.system(size: 48, weight: .bold))
                     .foregroundColor(darkMode ? .darkText : .black)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 12)
                 
                 // Form fields
                 VStack(spacing: 12) {
@@ -2457,8 +2344,8 @@ struct ExpenseFormView: View {
                 
                 Spacer()
                 
-                // Evenly spaced number pad
-                VStack(spacing: 16) {
+                // Number pad - always visible
+                VStack(spacing: 12) {
                     ForEach([["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], [".", "0", "←"]], id: \.self) { row in
                         HStack(spacing: 16) {
                             ForEach(row, id: \.self) { button in
@@ -2498,8 +2385,7 @@ struct ExpenseFormView: View {
                         }
                     }
                 }
-                
-                Spacer()
+                .padding(.bottom, 12)
                 
                 // Continue button
                 Button(action: {
@@ -2522,7 +2408,7 @@ struct ExpenseFormView: View {
                 .disabled(selectedCategory == nil || Double(amount) == nil)
                 .opacity((selectedCategory == nil || Double(amount) == nil) ? 0.6 : 1.0)
                 .padding(.horizontal)
-                .padding(.bottom, 30)
+                .padding(.bottom, 20)
             }
         }
         .onAppear {
@@ -2547,7 +2433,11 @@ struct SettingsView: View {
     @State private var showingRecoveryAlert = false
     @State private var recoveryMessage = ""
     
-
+    private let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
     
     var body: some View {
         NavigationView {
@@ -2559,8 +2449,10 @@ struct SettingsView: View {
                 Section(header: Text("Currency")) {
                     Picker("Default Currency", selection: $store.globalCurrency) {
                         ForEach(Currency.allCases) { currency in
-                            Text("\(currency.symbol) - \(currency.name)")
-                                .tag(currency)
+                            HStack {
+                                Text("\(currency.symbol) - \(currency.name)")
+                            }
+                            .tag(currency)
                         }
                     }
                     .pickerStyle(MenuPickerStyle())
@@ -2568,6 +2460,40 @@ struct SettingsView: View {
                         // Convert all existing trip data to new currency
                         Task {
                             await store.convertAllTripsToGlobalCurrency()
+                        }
+                    }
+                }
+                
+                Section(header: Text("Recently Deleted"), footer: Text("Deleted trips are automatically removed after 30 days.")) {
+                    if store.recentlyDeleted.isEmpty {
+                        Text("No recently deleted trips.")
+                            .foregroundColor(.secondary)
+                    } else {
+                        ForEach(store.recentlyDeleted) { trip in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                Text(trip.name)
+                                        .font(.system(size: 16, weight: .medium))
+                                    if let deletedDate = trip.deletedAt {
+                                        Text("Deleted \(relativeDateFormatter.string(from: deletedDate))")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                Button("Restore") { 
+                                    store.restoreTrip(trip)
+                                }
+                                .foregroundColor(.primaryPink)
+                                .font(.system(size: 14, weight: .semibold))
+                                
+                                Button("Delete") { 
+                                    store.permanentlyDeleteTrip(trip)
+                                }
+                                    .foregroundColor(.red)
+                                .font(.system(size: 14, weight: .semibold))
+                            }
+                            .padding(.vertical, 4)
                         }
                     }
                 }
@@ -2700,8 +2626,6 @@ struct ExpenseCard: View {
         .shadow(color: darkMode ? Color.clear : Color.black.opacity(0.08), radius: 4, x: 0, y: 2)
     }
 }
-
-
 
 private let dateFormatter: DateFormatter = {
     let df = DateFormatter()
