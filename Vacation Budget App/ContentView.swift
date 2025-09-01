@@ -253,10 +253,17 @@ class TripStore: ObservableObject {
     }
     
     init() {
-        load()
+        // Initialize defaults
+        trips = []
+        yearlyBudget = 0
+        globalCurrency = .usd
+        previousGlobalCurrency = .usd
+        
+        // Force load all data
         loadYearlyBudget()
         loadGlobalCurrency()
-        previousGlobalCurrency = globalCurrency // Initialize previous currency
+        previousGlobalCurrency = globalCurrency
+        load()
     }
     
     func addTrip(name: String, budget: Double, currency: Currency, icon: String, startDate: Date?, endDate: Date?) {
@@ -393,45 +400,36 @@ class TripStore: ObservableObject {
     }
     
     private func load() {
-        // Try primary key first
-        if let data = UserDefaults.standard.data(forKey: tripsKey) {
-            do {
-                let saved = try JSONDecoder().decode([Trip].self, from: data)
-            trips = saved
-                print("✅ Data loaded successfully from primary storage")
-                return
-            } catch {
-                print("❌ Failed to decode from primary: \(error)")
-                
-                // Try backup if primary fails
-                if let backupData = UserDefaults.standard.data(forKey: "\(tripsKey)_backup") {
-                    do {
-                        let saved = try JSONDecoder().decode([Trip].self, from: backupData)
-                        trips = saved
-                        print("🔄 Data recovered from backup!")
+        print("🚨 Starting data load process...")
+        
+        // Check all possible backup locations
+        let backupKeys = [tripsKey, "\(tripsKey)_backup", "\(tripsKey)_current"]
+        
+        for backupKey in backupKeys {
+            print("🔍 Checking key: \(backupKey)")
+            if let data = UserDefaults.standard.data(forKey: backupKey) {
+                print("📦 Found data for key: \(backupKey), size: \(data.count) bytes")
+                do {
+                    let recovered = try JSONDecoder().decode([Trip].self, from: data)
+                    if !recovered.isEmpty {
+                        trips = recovered
+                        print("✅ Successfully loaded \(recovered.count) trips from \(backupKey)")
                         return
-                    } catch {
-                        print("❌ Backup also failed: \(error)")
+                    } else {
+                        print("⚠️ Data found but empty array in \(backupKey)")
                     }
+                } catch {
+                    print("❌ Failed to decode from \(backupKey): \(error)")
+                    continue
                 }
-                
-                // Try current backup as last resort
-                if let currentData = UserDefaults.standard.data(forKey: "\(tripsKey)_current") {
-                    do {
-                        let saved = try JSONDecoder().decode([Trip].self, from: currentData)
-                        trips = saved
-                        print("🔄 Data recovered from current backup!")
-                        return
-                    } catch {
-                        print("❌ All recovery attempts failed: \(error)")
-                    }
-                }
+            } else {
+                print("❌ No data found for key: \(backupKey)")
             }
         }
         
         // If all else fails, start with empty array
         trips = []
-        print("⚠️ Starting with empty trip list")
+        print("⚠️ Starting with empty trip list - no recoverable data found")
     }
     
     private func saveYearlyBudget() {
@@ -691,27 +689,27 @@ struct ContentView: View {
                                 }
                                 .accessibilityLabel("Settings")
                             
-                            // Mode tip with arrow
+                            // Mode tip with arrow - showing opposite theme colors
                             HStack(spacing: 4) {
                                 Image(systemName: "arrow.left")
                                     .font(.system(size: 14, weight: .medium))
-                                    .foregroundColor(.primaryPink)
+                                    .foregroundColor(darkMode ? Color.white : Color.black)
                                 Text(darkMode ? "Try Light Mode!" : "Try Dark Mode!")
                                     .font(.system(size: 14, weight: .semibold, design: .rounded))
-                                    .foregroundColor(.primaryPink)
+                                    .foregroundColor(darkMode ? Color.white : Color.black)
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
                             .background(
                                 Capsule()
-                                    .fill(Color.white.opacity(darkMode ? 0.15 : 0.95))
-                                    .shadow(color: Color.primaryPink.opacity(0.15), radius: 8, x: 0, y: 4)
+                                    .fill(darkMode ? Color.black.opacity(0.8) : Color.white.opacity(0.9))
+                                    .shadow(color: (darkMode ? Color.black : Color.white).opacity(0.3), radius: 8, x: 0, y: 4)
                             )
                             .overlay(
                                 Capsule()
-                                    .stroke(darkMode ? Color.white.opacity(0.6) : Color.black.opacity(0.3), lineWidth: 1)
+                                    .stroke(darkMode ? Color.white.opacity(0.3) : Color.black.opacity(0.2), lineWidth: 1)
                             )
-                            .opacity(0.85)
+                            .opacity(0.9)
                             
                             Spacer()
                         }
@@ -1014,6 +1012,16 @@ struct YearlyBudgetEditView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("darkMode") private var darkMode = false
     @State private var budget: String = ""
+    @State private var currentEncouragementMessage: String = ""
+    
+    private let encouragingMessages = [
+        "You're already smarter than 70% of travelers by setting a budget",
+        "Having a budget saves travelers 3-5 hours on average in planning alone"
+    ]
+    
+    private func getRandomEncouragementMessage() -> String {
+        return encouragingMessages.randomElement() ?? encouragingMessages[0]
+    }
     
     var displayAmount: String {
         if budget.isEmpty {
@@ -1067,17 +1075,39 @@ struct YearlyBudgetEditView: View {
                 }
                 .padding(.horizontal)
                 
+                // Encouraging message card
+                if let budgetValue = Double(budget), budgetValue > 0 && !currentEncouragementMessage.isEmpty {
+                    Text(currentEncouragementMessage)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(LinearGradient(gradient: Gradient(colors: [Color.primaryPink, Color.secondaryPink]), startPoint: .leading, endPoint: .trailing))
+                        )
+                        .padding(.horizontal)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .transition(.opacity.combined(with: .slide))
+                }
+                
                 Spacer()
                 
-                // Number pad with better spacing
-                VStack(spacing: 16) {
+                // Evenly spaced number pad
+                VStack(spacing: 12) {
                     ForEach([["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], [".", "0", "←"]], id: \.self) { row in
-                        HStack(spacing: 16) {
+                        HStack(spacing: 12) {
                             ForEach(row, id: \.self) { button in
                                 Button(action: {
                                     if button == "←" {
                                         if !budget.isEmpty {
                                             budget.removeLast()
+                                            // Clear encouragement message when budget is cleared
+                                            if budget.isEmpty {
+                                                currentEncouragementMessage = ""
+                                            }
                                         }
                                     } else if button == "." {
                                         if !budget.contains(".") {
@@ -1097,11 +1127,24 @@ struct YearlyBudgetEditView: View {
                                             budget += button
                                         }
                                     }
+                                    
+                                    // Update encouragement message when valid budget is entered
+                                    if let budgetValue = Double(budget), budgetValue > 0 {
+                                        if currentEncouragementMessage.isEmpty {
+                                            withAnimation(.easeInOut(duration: 0.3)) {
+                                                currentEncouragementMessage = getRandomEncouragementMessage()
+                                            }
+                                        }
+                                    } else {
+                                        withAnimation(.easeOut(duration: 0.2)) {
+                                            currentEncouragementMessage = ""
+                                        }
+                                    }
                                 }) {
                                     Text(button)
-                                        .font(.system(size: 26, weight: .medium))
+                                        .font(.system(size: 24, weight: .medium))
                                         .foregroundColor(darkMode ? .darkText : .black)
-                                        .frame(width: 70, height: 70)
+                                        .frame(width: 65, height: 65)
                                         .background(darkMode ? Color.darkCard : Color.gray.opacity(0.1))
                                         .clipShape(Circle())
                                 }
@@ -1109,7 +1152,8 @@ struct YearlyBudgetEditView: View {
                         }
                     }
                 }
-                .padding(.bottom, 16)
+                
+                Spacer(minLength: 8)
                 
                 // Save button with proper spacing
                 Button(action: {
@@ -1576,6 +1620,7 @@ struct TripFormView: View {
     @State private var showDatePicker = false
     @State private var showingIconPicker = false
     @State private var dateSelectionStep: DateSelectionStep = .start
+    @State private var lastSelectedDate: Date = Date()
     @State private var hasSelectedDates = false
     @State private var showBudgetWarning = false
     @State private var budgetWarningAmount: Double = 0
@@ -1716,7 +1761,7 @@ struct TripFormView: View {
                                     }
                                 } else {
                                     // Fetch new exchange rates when currency changes
-                                    Task {
+                                    Task { @MainActor in
                                         await exchangeRateService.fetchExchangeRates()
                                     }
                                 }
@@ -1787,6 +1832,11 @@ struct TripFormView: View {
                                         if dateRangeDisplay.isEmpty {
                                             showDatePicker = true
                                             dateSelectionStep = .start
+                                            lastSelectedDate = startDate
+                                            // Ensure endDate is not the same as startDate initially
+                                            if endDate == startDate {
+                                                endDate = Calendar.current.date(byAdding: .day, value: 1, to: startDate) ?? startDate
+                                            }
                                         }
                                     } else {
                                         // When turned OFF, clear dates and hide calendar
@@ -1794,7 +1844,8 @@ struct TripFormView: View {
                                         // Reset dates without triggering onChange
                                         DispatchQueue.main.async {
                                             startDate = Date()
-                                            endDate = Date()
+                                            endDate = Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+                                            lastSelectedDate = Date()
                                         }
                                     }
                                 }
@@ -1841,47 +1892,37 @@ struct TripFormView: View {
                                     .shadow(color: dateSelectionStep == .complete ? Color.primaryPink.opacity(0.4) : Color.clear, radius: 4, x: 0, y: 2)
                                 }
                                 
-                                DatePicker("", selection: dateSelectionStep == .start ? $startDate : $endDate, displayedComponents: .date)
+                                DatePicker("", selection: $lastSelectedDate, displayedComponents: .date)
                                     .datePickerStyle(GraphicalDatePickerStyle())
                                     .accentColor(.primaryPink)
-                                    .onChange(of: startDate) { newStartDate in
-                                        // Only process if we're actually in start selection mode
-                                        guard dateSelectionStep == .start || dateSelectionStep == .complete else { return }
-                                        
-                                        if dateSelectionStep == .start {
-                                            // Move to end date selection
-                                            dateSelectionStep = .end
-                                            // Ensure end date is not before start date
-                                            if endDate < newStartDate {
-                                                DispatchQueue.main.async {
-                                                    endDate = newStartDate
+                                    .onChange(of: lastSelectedDate) { newSelectedDate in
+                                        DispatchQueue.main.async {
+                                            if dateSelectionStep == .start {
+                                                // First tap: set start date
+                                                startDate = newSelectedDate
+                                                // If end date is before start date, adjust it
+                                                if endDate < newSelectedDate {
+                                                    endDate = Calendar.current.date(byAdding: .day, value: 1, to: newSelectedDate) ?? newSelectedDate
                                                 }
-                                            }
-                                        } else if dateSelectionStep == .complete {
-                                            // User wants to restart: reset to end selection
-                                            dateSelectionStep = .end
-                                            // Ensure end date is not before new start date
-                                            if endDate < newStartDate {
-                                                DispatchQueue.main.async {
-                                                    endDate = newStartDate
+                                                dateSelectionStep = .end
+                                            } else if dateSelectionStep == .end {
+                                                // Second tap: set end date
+                                                if newSelectedDate >= startDate {
+                                                    endDate = newSelectedDate
+                                                    dateSelectionStep = .complete
+                                                    hasSelectedDates = true
+                                                } else {
+                                                    // If user picks a date before start, make it the new start date
+                                                    startDate = newSelectedDate
+                                                    dateSelectionStep = .end
                                                 }
+                                            } else if dateSelectionStep == .complete {
+                                                // Third tap: restart - this becomes new start date
+                                                startDate = newSelectedDate
+                                                // Reset end date to be after start date
+                                                endDate = Calendar.current.date(byAdding: .day, value: 1, to: newSelectedDate) ?? newSelectedDate
+                                                dateSelectionStep = .end
                                             }
-                                        }
-                                    }
-                                    .onChange(of: endDate) { newEndDate in
-                                        // Only process if we're actually in end selection mode
-                                        guard dateSelectionStep == .end || dateSelectionStep == .complete else { return }
-                                        
-                                        if dateSelectionStep == .end {
-                                            // Complete the selection
-                                            dateSelectionStep = .complete
-                                            hasSelectedDates = true
-                                        } else if dateSelectionStep == .complete {
-                                            // User wants to restart: this end date becomes the new start date
-                                            DispatchQueue.main.async {
-                                                startDate = newEndDate
-                                            }
-                                            dateSelectionStep = .end
                                         }
                                     }
                             }
@@ -2061,11 +2102,14 @@ struct TripFormView: View {
                 selectedIcon = trip.icon
                 startDate = trip.startDate ?? Date()
                 endDate = trip.endDate ?? Date()
+                lastSelectedDate = trip.startDate ?? Date()
                 hasSelectedDates = trip.startDate != nil
+            } else {
+                lastSelectedDate = startDate
             }
             
             // Fetch exchange rates when view appears
-            Task {
+            Task { @MainActor in
                 await exchangeRateService.fetchExchangeRates()
             }
         }
@@ -2132,6 +2176,16 @@ struct CategoryFormView: View {
     @AppStorage("darkMode") private var darkMode = false
     @State private var name: String = ""
     @State private var amount: String = ""
+    @State private var selectedPresetCategory: String = ""
+    @State private var showingCustomInput = false
+    
+    private let presetCategories = [
+        "Flights",
+        "Hotel/Airbnb", 
+        "Food/Entertainment",
+        "Ground Transportation",
+        "Custom"
+    ]
     
     var smartMessage: String {
         guard let amountValue = Double(amount), amountValue > 0 else { return "" }
@@ -2193,26 +2247,86 @@ struct CategoryFormView: View {
                 
                 // Form fields
                 VStack(spacing: 12) {
-                    // Category name field
-                    HStack {
-                        Image(systemName: "folder.fill")
+                    // Category name picker/field
+                    if showingCustomInput {
+                        // Custom text input
+                        HStack {
+                            Image(systemName: "folder.fill")
+                                .foregroundColor(.primaryPink)
+                                .frame(width: 20, height: 20)
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Category Name")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(darkMode ? .darkSecondaryText : .gray)
+                                TextField("Enter custom category name", text: $name)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(darkMode ? .darkText : .black)
+                            }
+                            
+                            Button("Back") {
+                                showingCustomInput = false
+                                name = ""
+                                selectedPresetCategory = ""
+                            }
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.primaryPink)
-                            .frame(width: 20, height: 20)
-                        
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Category Name")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(darkMode ? .darkSecondaryText : .gray)
-                            TextField("Enter category name", text: $name)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(darkMode ? .darkText : .black)
                         }
-                        Spacer()
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .background(darkMode ? Color.darkCard : Color.gray.opacity(0.05))
+                        .cornerRadius(10)
+                    } else {
+                        // Category picker
+                        Menu {
+                            ForEach(presetCategories, id: \.self) { categoryOption in
+                                Button(action: {
+                                    if categoryOption == "Custom" {
+                                        showingCustomInput = true
+                                        selectedPresetCategory = ""
+                                        name = ""
+                                    } else {
+                                        selectedPresetCategory = categoryOption
+                                        name = categoryOption
+                                        showingCustomInput = false
+                                    }
+                                }) {
+                                    HStack {
+                                        Text(categoryOption)
+                                        if categoryOption == "Custom" {
+                                            Spacer()
+                                            Image(systemName: "pencil")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .foregroundColor(.primaryPink)
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "folder.fill")
+                                    .foregroundColor(.primaryPink)
+                                    .frame(width: 20, height: 20)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Category Name")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(darkMode ? .darkSecondaryText : .gray)
+                                    Text(selectedPresetCategory.isEmpty ? "Select category" : selectedPresetCategory)
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(selectedPresetCategory.isEmpty ? (darkMode ? .darkSecondaryText : .gray) : (darkMode ? .darkText : .black))
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.down")
+                                    .foregroundColor(darkMode ? .darkSecondaryText : .gray)
+                                    .font(.system(size: 12))
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .background(darkMode ? Color.darkCard : Color.gray.opacity(0.05))
+                            .cornerRadius(10)
+                        }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(darkMode ? Color.darkCard : Color.gray.opacity(0.05))
-                    .cornerRadius(10)
                     
                     if !smartMessage.isEmpty {
                         Text(smartMessage)
@@ -2289,8 +2403,8 @@ struct CategoryFormView: View {
                         .cornerRadius(16)
                         .shadow(color: Color.primaryPink.opacity(0.4), radius: 8, x: 0, y: 4)
                 }
-                .disabled(name.isEmpty || Double(amount) == nil)
-                .opacity((name.isEmpty || Double(amount) == nil) ? 0.6 : 1.0)
+                .disabled((showingCustomInput ? name.isEmpty : selectedPresetCategory.isEmpty) || Double(amount) == nil)
+                .opacity(((showingCustomInput ? name.isEmpty : selectedPresetCategory.isEmpty) || Double(amount) == nil) ? 0.6 : 1.0)
                 .padding(.horizontal)
                 .padding(.bottom, 30)
             }
@@ -2298,6 +2412,17 @@ struct CategoryFormView: View {
         .onAppear {
             if let category = category {
                 name = category.name
+                
+                // Check if the existing category matches a preset
+                if presetCategories.contains(category.name) && category.name != "Custom" {
+                    selectedPresetCategory = category.name
+                    showingCustomInput = false
+                } else {
+                    // It's a custom category
+                    selectedPresetCategory = ""
+                    showingCustomInput = true
+                }
+                
                 // Format with appropriate decimal places for currency accuracy
                 if category.plannedAmount.truncatingRemainder(dividingBy: 1) == 0 {
                     amount = String(format: "%.0f", category.plannedAmount)
@@ -2566,7 +2691,7 @@ struct SettingsView: View {
                     .pickerStyle(MenuPickerStyle())
                     .onChange(of: store.globalCurrency) { newCurrency in
                         // Convert all existing trip data to new currency
-                        Task {
+                        Task { @MainActor in
                             await store.convertAllTripsToGlobalCurrency()
                         }
                     }
